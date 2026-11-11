@@ -1,0 +1,20 @@
+# Quick actions, shown under Trigger > Music and Music > Tools.
+# Columns: section<TAB>entry<TAB>label<TAB>action<TAB>checked
+# `checked` is a shell test the launcher evaluates to show state; "-" none.
+trigger.music	doctor	Audio Doctor	omarchy-launch-tui bash -c 'audiomarchy doctor; exec bash'	-
+trigger.music	session	Session Mode	omarchy-launch-tui bash -c 'audiomarchy session status; exec bash'	test -f ~/.local/state/audiomarchy/session/active
+trigger.music	session-start	Start Session Mode	omarchy-launch-tui bash -c 'audiomarchy session start; exec bash'	-
+trigger.music	session-stop	Stop Session Mode	omarchy-launch-tui bash -c 'audiomarchy session stop; exec bash'	-
+trigger.music	latency-low	Buffer: Low (128)	audiomarchy audio latency low	-
+trigger.music	latency-balanced	Buffer: Balanced (256)	audiomarchy audio latency balanced	-
+trigger.music	latency-safe	Buffer: Safe (1024)	audiomarchy audio latency safe	-
+trigger.music	loopback	Loopback	omarchy-launch-tui bash -c 'audiomarchy device loopback status; exec bash'	test -f ~/.config/pipewire/pipewire-pulse.conf.d/90-audiomarchy-loopback.conf
+trigger.music	loopback-on	Loopback On	audiomarchy device loopback on	-
+trigger.music	loopback-off	Loopback Off	audiomarchy device loopback off	-
+trigger.music	plugins	Plugin Scan	omarchy-launch-tui bash -c 'audiomarchy plugins scan; exec bash'	-
+trigger.music	restart	Restart Audio	omarchy-restart-pipewire	-
+trigger.music	projects	Projects	uwsm-app -- xdg-open "$HOME/Music/Audiomarchy/Projects"	-
+music.tools	doctor	Audio Doctor	omarchy-launch-tui bash -c 'audiomarchy doctor; exec bash'	-
+music.tools	plugins	Plugin Scan	omarchy-launch-tui bash -c 'audiomarchy plugins scan; exec bash'	-
+music.tools	session	Session Mode	omarchy-launch-tui bash -c 'audiomarchy session status; exec bash'	test -f ~/.local/state/audiomarchy/session/active
+music.tools	projects	Projects	uwsm-app -- xdg-open "$HOME/Music/Audiomarchy/Projects"	-

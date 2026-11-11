@@ -1,0 +1,39 @@
+# Music menu rows.
+# Columns: entry<TAB>category<TAB>label<TAB>package<TAB>mode<TAB>extra
+#
+#   gui    launch the package's own binary in a GUI window
+#   tui    open the binary in a terminal, then leave the shell
+#   plugin open the LV2/VST3/CLAP bundle folder
+#   action use `extra` as the command
+#
+# Binary and bundle paths are discovered from pacman at build time, so a row
+# for something that is not installed is skipped instead of guessed at.
+reaper	daws	REAPER	reaper	gui	-
+ardour	daws	Ardour	ardour	gui	-
+bitwig	daws	Bitwig Studio	bitwig-studio	gui	-
+surge-xt	instruments	Surge XT	surge-xt	plugin	-
+cardinal	instruments	Cardinal	cardinal	gui	-
+hydrogen	instruments	Hydrogen	hydrogen	gui	-
+sfizz	instruments	SFizz	sfizz	plugin	-
+vital	instruments	Vital	vital	plugin	-
+fluidsynth	instruments	FluidSynth	fluidsynth	tui	-
+drumgizmo	instruments	DrumGizmo	drumgizmo	tui	-
+lsp-plugins	effects	LSP Plugins	lsp-plugins	plugin	-
+calf	effects	Calf	calf	plugin	-
+dragonfly	effects	Dragonfly Reverb	dragonfly-reverb	plugin	-
+x42	effects	x42 Plugins	x42-plugins	plugin	-
+zam	effects	ZamPlugins	zam-plugins	plugin	-
+easyeffects	effects	EasyEffects	easyeffects	gui	-
+guitarix	effects	Guitarix	guitarix	gui	-
+carla	routing	Carla	carla	gui	-
+qpwgraph	routing	qpwgraph	qpwgraph	gui	-
+helvum	routing	Helvum	helvum	gui	-
+jack-tools	routing	JACK Tools	jack-example-tools	tui	-
+audacity	mastering	Audacity	audacity	gui	-
+sonic-visualiser	mastering	Sonic Visualiser	sonic-visualiser	gui	-
+mixxx	live	Mixxx	mixxx	gui	-
+qtractor	live	Qtractor	qtractor	gui	-
+musescore	notation	MuseScore	musescore	gui	-
+yabridge	tools	yabridgectl	yabridge	action	omarchy-launch-tui bash -c 'yabridgectl status; exec bash'
+wine	tools	Wine Configuration	wine-staging	action	uwsm-app -- winecfg
+rtcqs	tools	Realtime Check	rtcqs	tui	-
