@@ -51,23 +51,37 @@ That runs `yabridgectl sync`. The workflow:
 
 ### Wine prefix
 
-Use one dedicated prefix for audio, so a plugin install cannot break your
-other Wine apps:
+The installer creates `~/.wine-audiomarchy` and records it in
+`~/.config/audiomarchy/wine-prefix`. `audiomarchy plugins install` runs
+installers there, and yabridge derives the prefix from the plugin paths it was
+given, so you do not need to export `WINEPREFIX` for your DAW.
 
 ```bash
-WINEPREFIX=~/.wine-audio wineboot -u
-WINEPREFIX=~/.wine-audio yabridgectl sync
+audiomarchy plugins prefix status
+audiomarchy plugins prefix init
+audiomarchy plugins prefix backup
 ```
 
-Set `WINEPREFIX` in your DAW's environment (or in `~/.config/hypr/envs.conf`)
-so yabridge and the DAW agree on the prefix.
+### iLok, Waves and Native Instruments
 
-### What will not work
+iLok is not simply "unsupported": many iLok plugins run, some do not, and a
+USB iLok dongle cannot work because PACE needs a Windows kernel driver. Waves
+and Native Instruments have their own quirks. The installer sets up a
+dedicated prefix and a matching yabridge build, and the CLI has vendor
+helpers:
 
-- iLok / Pace-protected plugins.
-- Plugins with kernel-level anti-tamper.
-- Some installers that require a full Windows shell.
-- 32-bit plugins on a 64-bit-only Wine prefix unless you add a 32-bit prefix.
+```bash
+audiomarchy plugins install ~/Downloads/PluginSetup.exe
+audiomarchy plugins vendor ilok      # also: waves, ni
+audiomarchy plugins doctor
+audiomarchy plugins prefix backup
+```
+
+See [windows-plugins.md](windows-plugins.md) for the compatibility notes and
+what to do when a plugin refuses to authorize.
+
+Still out of reach: kernel-level anti-tamper, installers that need a full
+Windows shell, and 32-bit plugins in a 64-bit-only prefix.
 
 ## Why the window rules matter
 

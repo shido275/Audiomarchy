@@ -8,7 +8,7 @@
 #
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/audiomarchy"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/audiomarchy"
@@ -18,6 +18,8 @@ PIPEWIRE_DROPIN="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/90-a
 LOOPBACK_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire-pulse.conf.d/90-audiomarchy-loopback.conf"
 PROJECTS_DIR="${AUDIOMARCHY_MUSIC_DIR:-$HOME/Music/Audiomarchy}/Projects"
 SESSION_DIR="$STATE_DIR/session"
+WINE_PREFIX_FILE="$CONFIG_DIR/wine-prefix"
+WINE_BACKUP_DIR="$STATE_DIR/wine-backups"
 
 if [[ -t 1 ]]; then
   BOLD=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'
@@ -59,8 +61,12 @@ Usage: audiomarchy <group> <command>
   session status
   session start --offline   also switch Wi-Fi off for the session
 
-  plugins scan              bridge and rescan Windows VST2/VST3 plugins
-  plugins status            yabridge status
+  plugins scan              bridge and rescan every Windows plugin
+  plugins install <exe>     run a Windows plugin installer in the studio prefix
+  plugins prefix [init]     show/create the Wine prefix (deps, backup, open)
+  plugins vendor ilok|waves|ni   licensing app help and launcher
+  plugins doctor            Wine/yabridge/iLok/Waves/NI diagnostics
+  plugins list              what is installed and bridged
   plugins dirs              create the standard plugin/project folders
 
   project new "Name"        scaffold a project folder
@@ -463,6 +469,429 @@ session_cmd() {
   esac
 }
 
+# --- windows plugin host --------------------------------------------------
+
+wine_prefix_path() {
+  if [[ -n ${AUDIOMARCHY_WINE_PREFIX:-} ]]; then
+    printf '%s\n' "$AUDIOMARCHY_WINE_PREFIX"
+    return 0
+  fi
+  if [[ -s $WINE_PREFIX_FILE ]]; then
+    head -1 "$WINE_PREFIX_FILE"
+    return 0
+  fi
+  printf '%s\n' "$HOME/.wine-audiomarchy"
+}
+
+yabridge_ctl() {
+  command -v yabridgectl 2>/dev/null
+}
+
+wine_prefix_dirs=(
+  "drive_c/Program Files/Common Files/VST3"
+  "drive_c/Program Files/Common Files/VST2"
+  "drive_c/Program Files/VstPlugins"
+  "drive_c/Program Files/Steinberg/VSTPlugins"
+)
+
+wine_prefix_init() {
+  local prefix=${1:-$(wine_prefix_path)} dir
+  if ! command -v wine >/dev/null 2>&1; then
+    fail "Wine is not installed — run ./install.sh"
+    return 1
+  fi
+  if [[ ! -f $prefix/system.reg ]]; then
+    say "Creating the studio Wine prefix"
+    mkdir -p "$(dirname "$prefix")" || return 1
+    if ! WINEPREFIX="$prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" \
+      wineboot -u >/dev/null 2>&1; then
+      fail "wineboot failed for $prefix"
+      return 1
+    fi
+    WINEPREFIX="$prefix" WINEDEBUG=-all wine reg add 'HKCU\Software\Wine' \
+      /v Version /t REG_SZ /d win10 /f >/dev/null 2>&1
+    ok "Wine prefix created: $prefix"
+  fi
+  for dir in "${wine_prefix_dirs[@]}"; do
+    mkdir -p "$prefix/$dir"
+  done
+  mkdir -p "$(dirname "$WINE_PREFIX_FILE")"
+  printf '%s\n' "$prefix" > "$WINE_PREFIX_FILE"
+  return 0
+}
+
+plugins_register_dirs() {
+  local prefix ctl dir count=0
+  prefix=$(wine_prefix_path)
+  ctl=$(yabridge_ctl) || {
+    warn "yabridgectl is not installed — no bridge folders registered"
+    return 0
+  }
+  for dir in "${wine_prefix_dirs[@]}"; do
+    [[ -d $prefix/$dir ]] || mkdir -p "$prefix/$dir"
+    if "$ctl" add "$prefix/$dir" >/dev/null 2>&1; then
+      count=$((count + 1))
+    fi
+  done
+  ok "registered $count Windows plugin folder(s) with yabridgectl"
+  return 0
+}
+
+# Find plugins an installer dropped somewhere unexpected. VST3 bundles are
+# unambiguous. VST2 DLLs are not, so only folders whose name suggests plugins
+# are registered — otherwise yabridge would be handed application libraries.
+plugins_discover() {
+  local prefix=$1 ctl path dir lower added=0
+  local -A seen=()
+  ctl=$(yabridge_ctl) || return 0
+
+  while IFS= read -r path; do
+    [[ $path == *"/windows/"* || $path == *"/WinSxS/"* ]] && continue
+    [[ $path == *"/system32/"* || $path == *"/SysWOW64/"* ]] && continue
+    # yabridgectl wants the folder that contains bundles, not the bundle.
+    dir=$(dirname "$path")
+    [[ -n ${seen[$dir]:-} ]] && continue
+    seen[$dir]=1
+    if "$ctl" add "$dir" >/dev/null 2>&1; then
+      added=$((added + 1))
+    fi
+  done < <(find "$prefix/drive_c" -maxdepth 7 -type d -name '*.vst3' 2>/dev/null)
+
+  while IFS= read -r path; do
+    [[ $path == *"/windows/"* || $path == *"/WinSxS/"* ]] && continue
+    [[ $path == *"/system32/"* || $path == *"/SysWOW64/"* ]] && continue
+    dir=$(dirname "$path")
+    lower=${dir,,}
+    [[ $lower == *vst* || $lower == *plug* || $lower == *steinberg* ]] ||
+      [[ $lower == *waves* || $lower == *"native instruments"* || $lower == *kontakt* ]] ||
+      [[ $lower == *izotope* || $lower == *arturia* || $lower == *fabfilter* ]] ||
+      [[ $lower == *"plugin alliance"* || $lower == *soundtoys* || $lower == *toontrack* ]] ||
+      continue
+    [[ -n ${seen[$dir]:-} ]] && continue
+    seen[$dir]=1
+    if "$ctl" add "$dir" >/dev/null 2>&1; then
+      added=$((added + 1))
+    fi
+  done < <(find "$prefix/drive_c" -maxdepth 7 -type f -name '*.dll' \
+    \( -path '*/Program Files/*' -o -path '*/Program Files (x86)/*' \) 2>/dev/null)
+
+  if (( added > 0 )); then
+    ok "added $added plugin folder(s) to yabridgectl"
+  fi
+  return 0
+}
+
+plugins_sync() {
+  local ctl
+  plugins_dirs >/dev/null
+  if [[ ! -d $(wine_prefix_path) ]]; then
+    warn "no Wine prefix yet — audiomarchy plugins prefix init"
+    return 1
+  fi
+  ctl=$(yabridge_ctl) || {
+    warn "yabridgectl is not installed — run ./install.sh"
+    return 1
+  }
+  say "Bridging Windows plugins"
+  "$ctl" sync
+  echo
+  "$ctl" status | head -40
+  note "VST2 ~/.vst    VST3 ~/.vst3    LV2 ~/.lv2    CLAP ~/.clap"
+  note "Rescan plugins in your DAW to pick up new bridges."
+}
+
+plugins_install() {
+  local exe="" sync=1 arg prefix rc
+  for arg in "$@"; do
+    case $arg in
+      --no-sync) sync=0 ;;
+      *) exe=$arg ;;
+    esac
+  done
+
+  if [[ -z $exe ]]; then
+    if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && command -v zenity >/dev/null 2>&1; then
+      exe=$(zenity --file-selection --title="Choose a Windows plugin installer" \
+        --file-filter='Windows installer (*.exe) | *.exe' 2>/dev/null) || true
+    fi
+    if [[ -z $exe && -t 0 ]]; then
+      read -r -p "Path to the Windows installer (.exe): " exe
+    fi
+  fi
+
+  [[ -n $exe ]] || { fail "usage: audiomarchy plugins install <installer.exe>"; return 2; }
+  [[ -f $exe ]] || { fail "no such file: $exe"; return 1; }
+  [[ $exe == *.exe || $exe == *.msi ]] || warn "not a Windows installer: $exe"
+
+  prefix=$(wine_prefix_path)
+  wine_prefix_init "$prefix" || return 1
+
+  say "Running $(basename "$exe") in $prefix"
+  note "Install plugins to the default Windows locations so the bridge finds them."
+  WINEPREFIX="$prefix" WINEDEBUG=-all wine "$exe"
+  rc=$?
+  if (( rc == 0 )); then
+    ok "installer finished"
+  else
+    warn "installer exited $rc — if it installed anyway, carry on"
+  fi
+
+  plugins_discover "$prefix"
+  if (( sync )); then
+    plugins_sync
+  fi
+  return 0
+}
+
+plugins_backup() {
+  local prefix archive stamp
+  prefix=$(wine_prefix_path)
+  [[ -d $prefix ]] || { fail "no Wine prefix to back up"; return 1; }
+  mkdir -p "$WINE_BACKUP_DIR"
+  stamp=$(date +%Y%m%d-%H%M%S)
+  archive="$WINE_BACKUP_DIR/prefix-$stamp.tar.gz"
+  say "Backing up the Wine prefix (iLok machine state lives here)"
+  # A running wineserver keeps writing registry/log files; tar then fails with
+  # "file changed as we read it". Stop this prefix's server first.
+  if command -v wineserver >/dev/null 2>&1; then
+    WINEPREFIX="$prefix" wineserver -k >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  local rc=0
+  tar -czf "$archive" -C "$(dirname "$prefix")" "$(basename "$prefix")" || rc=$?
+  if (( rc != 0 )); then
+    if [[ -s $archive && $rc -eq 1 ]]; then
+      warn "the prefix changed while archiving — backup may be incomplete"
+    else
+      rm -f "$archive"
+      fail "backup failed"
+      return 1
+    fi
+  fi
+  ok "backup: $archive ($(du -h "$archive" | cut -f1))"
+  note "Restore while no plugin is running: tar -xzf '$archive' -C '$(dirname "$prefix")'"
+}
+
+plugins_prefix_cmd() {
+  local cmd=${1:-status} prefix ctl
+  prefix=$(wine_prefix_path)
+  case $cmd in
+    status|path)
+      echo "  prefix   $prefix"
+      if [[ -d $prefix ]]; then
+        echo "  state    $(du -sh "$prefix" 2>/dev/null | cut -f1) on disk"
+      else
+        echo "  state    not created yet"
+      fi
+      command -v wine >/dev/null 2>&1 && echo "  wine     $(wine --version 2>/dev/null)"
+      ctl=$(yabridge_ctl)
+      if [[ -n $ctl ]]; then
+        echo "  bridge   $("$ctl" --version 2>/dev/null | head -1)"
+      else
+        echo "  bridge   missing"
+      fi
+      ;;
+    init)
+      wine_prefix_init "$prefix" || return 1
+      plugins_register_dirs
+      ;;
+    deps)
+      wine_prefix_init "$prefix" || return 1
+      if ! command -v winetricks >/dev/null 2>&1; then
+        fail "winetricks is not installed — rerun ./install.sh"
+        return 1
+      fi
+      say "Installing Windows runtime helpers (fonts, VC++ runtime)"
+      if ! WINEPREFIX="$prefix" WINEDEBUG=-all winetricks -q corefonts vcrun2019; then
+        warn "winetricks reported errors — installers may still work"
+        return 1
+      fi
+      ok "runtime helpers installed"
+      ;;
+    backup) plugins_backup ;;
+    open) xdg-open "$prefix/drive_c" >/dev/null 2>&1 & ;;
+    *) fail "unknown prefix command: $cmd"; return 2 ;;
+  esac
+}
+
+plugins_doctor() {
+  local fails=0 warns=0 prefix ctl wine_ver maj min
+  prefix=$(wine_prefix_path)
+  hdr "Windows plugin host"
+
+  if command -v wine >/dev/null 2>&1; then
+    wine_ver=$(wine --version 2>/dev/null)
+    ok "Wine: $wine_ver"
+    maj=$(sed -E 's/^wine-([0-9]+).*/\1/' <<< "$wine_ver")
+    min=$(sed -E 's/^wine-[0-9]+\.([0-9]+).*/\1/' <<< "$wine_ver")
+  else
+    fail "Wine is not installed — run ./install.sh"
+    fails=$((fails + 1))
+  fi
+
+  if [[ -d $prefix ]]; then
+    ok "prefix: $prefix"
+    note "$(du -sh "$prefix" 2>/dev/null | cut -f1) on disk"
+  else
+    warn "no studio prefix yet — audiomarchy plugins prefix init"
+    warns=$((warns + 1))
+  fi
+
+  ctl=$(yabridge_ctl)
+  if [[ -n $ctl ]]; then
+    ok "yabridgectl: $ctl"
+  else
+    fail "yabridgectl is missing — the bridge cannot be synced"
+    fails=$((fails + 1))
+  fi
+
+  if pacman -Qq yabridge-wine10-git >/dev/null 2>&1; then
+    ok "yabridge: Wine 10+ build"
+  elif pacman -Qq yabridge >/dev/null 2>&1; then
+    if [[ ${maj:-0} =~ ^[0-9]+$ ]] && (( maj > 9 || (maj == 9 && ${min:-0} >= 22) )); then
+      fail "yabridge 5.1.1 cannot host plugins under Wine $maj.${min:-0}"
+      note "run ./install.sh to switch to yabridge-wine10-git (AUR)"
+      fails=$((fails + 1))
+    else
+      ok "yabridge: 5.1.1 (matches Wine $maj.${min:-0})"
+    fi
+  else
+    warn "yabridge is not installed"
+    warns=$((warns + 1))
+  fi
+
+  local ilok waves ni bridged
+  ilok=$(find "$prefix/drive_c" -maxdepth 4 -iname 'iLok License Manager.exe' -print -quit 2>/dev/null)
+  if [[ -n $ilok ]]; then
+    ok "iLok License Manager installed"
+    note "software and Cloud licenses only — a USB iLok needs a Windows kernel driver"
+  else
+    note "iLok License Manager: not installed (plugins vendor ilok)"
+  fi
+
+  waves=$(find "$prefix/drive_c" -maxdepth 5 -type d -iname 'Plug-Ins V*' -print -quit 2>/dev/null)
+  if [[ -n $waves ]]; then
+    ok "Waves plugins: $(basename "$waves")"
+    note "v13/v14 are the most reliable; v15 has known crashes under Wine"
+  fi
+
+  ni=$(find "$prefix/drive_c" -maxdepth 7 -iname 'Native Access.exe' -print -quit 2>/dev/null)
+  if [[ -n $ni ]]; then
+    ok "Native Access installed"
+    note "Native Access 2 is Electron-based; use legacy 1.x if it will not start"
+  fi
+
+  bridged=$(find "$HOME/.vst" "$HOME/.vst3" \( -name '*.so' -o -name '*.vst3' \) 2>/dev/null | wc -l)
+  note "Linux-side bridged plugin files: $bridged"
+
+  if [[ -d $WINE_BACKUP_DIR ]]; then
+    local last
+    last=$(find "$WINE_BACKUP_DIR" -maxdepth 1 -name 'prefix-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr | head -1 | cut -d' ' -f2-)
+    [[ -n $last ]] && note "last prefix backup: $(basename "$last")"
+  fi
+
+  hdr "Summary"
+  if (( fails > 0 )); then
+    fail "$fails problem(s), $warns warning(s)"
+    return 1
+  fi
+  if (( warns > 0 )); then
+    warn "no failures, $warns warning(s)"
+  else
+    ok "plugin host looks ready"
+  fi
+  return 0
+}
+
+plugins_vendor() {
+  local vendor=${1:-} installer=${2:-} prefix app url
+  [[ -n $vendor ]] || {
+    fail "usage: audiomarchy plugins vendor ilok|waves|ni [installer.exe]"
+    return 2
+  }
+  prefix=$(wine_prefix_path)
+  if [[ -n $installer && -f $installer ]]; then
+    plugins_install "$installer"
+    return
+  fi
+
+  case $vendor in
+    ilok)
+      url="https://www.ilok.com/#!license-manager"
+      app=$(find "$prefix/drive_c" -maxdepth 5 -iname 'iLok License Manager.exe' -print -quit 2>/dev/null)
+      ;;
+    waves)
+      url="https://www.waves.com/downloads/central"
+      app=$(find "$prefix/drive_c" -maxdepth 7 -iname 'Waves Central.exe' -print -quit 2>/dev/null)
+      ;;
+    ni|native-instruments|native-access)
+      url="https://www.native-instruments.com/en/specials/native-access/"
+      app=$(find "$prefix/drive_c" -maxdepth 7 -iname 'Native Access.exe' -print -quit 2>/dev/null)
+      ;;
+    *)
+      fail "unknown vendor: $vendor (ilok, waves, ni)"
+      return 2
+      ;;
+  esac
+
+  hdr "Vendor setup: $vendor"
+  case $vendor in
+    ilok)
+      note "iLok has no Linux support. Software and iLok Cloud licenses sometimes work;"
+      note "a USB iLok needs a Windows kernel driver and will not be visible."
+      note "Reports favour iLok License Manager 5.6.1; newer installers often fail."
+      note "Activate to this computer, then back up the prefix:"
+      note "  audiomarchy plugins prefix backup"
+      ;;
+    waves)
+      note "Waves Central installs and activates under Wine. Activate to this computer"
+      note "(Windows 10), not to a USB drive. v13/v14 are the most reliable; v15 has"
+      note "known crashes. After installing: audiomarchy plugins sync"
+      ;;
+    *)
+      note "Native Access 2 is Electron-based and generally will not start under Wine."
+      note "Use the legacy Native Access 1.x installer. Kontakt 7 works; Kontakt 8 is"
+      note "unreliable. The community 'NI on Linux' Flatpak is the fallback."
+      ;;
+  esac
+  note "Download: $url"
+
+  if [[ -n $app ]]; then
+    say "Launching $(basename "$app")"
+    if command -v uwsm-app >/dev/null 2>&1; then
+      WINEPREFIX="$prefix" WINEDEBUG=-all uwsm-app -- wine "$app" >/dev/null 2>&1 &
+    else
+      WINEPREFIX="$prefix" WINEDEBUG=-all wine "$app" >/dev/null 2>&1 &
+    fi
+    return 0
+  fi
+
+  say "Installer not found in the prefix"
+  note "Download it from the URL above, then:"
+  note "  audiomarchy plugins install <path-to-installer.exe>"
+  return 1
+}
+
+plugins_list() {
+  local prefix ctl
+  prefix=$(wine_prefix_path)
+  echo "  prefix  $prefix"
+  if [[ -d $prefix ]]; then
+    echo "  size    $(du -sh "$prefix" 2>/dev/null | cut -f1)"
+  fi
+  ctl=$(yabridge_ctl)
+  if [[ -n $ctl ]]; then
+    echo
+    "$ctl" status | head -30
+  fi
+  echo
+  note "vendor apps:"
+  find "$prefix/drive_c" -maxdepth 7 \
+    \( -iname 'iLok License Manager.exe' -o -iname 'Waves Central.exe' -o -iname 'Native Access.exe' \) \
+    2>/dev/null | sed 's|.*/||; s/^/    /'
+}
+
 # --- plugins and projects -------------------------------------------------
 
 plugins_dirs() {
@@ -476,29 +905,25 @@ plugins_dirs() {
   done
 }
 
-plugins_scan() {
-  plugins_dirs
-  if command -v yabridgectl >/dev/null 2>&1; then
-    say "Bridging Windows plugins"
-    yabridgectl sync
-    echo
-    yabridgectl status
-  else
-    warn "yabridgectl is not installed — install yabridge with ./install.sh"
-  fi
-  echo
-  note "VST2 ~/.vst    VST3 ~/.vst3    LV2 ~/.lv2    CLAP ~/.clap"
-  note "Point your DAW's plugin scan at those folders."
-}
+
 
 plugins_cmd() {
   case "${1:-scan}" in
-    scan|sync) plugins_scan ;;
+    scan|sync) plugins_sync ;;
     status)
-      command -v yabridgectl >/dev/null 2>&1 &&
-        yabridgectl status || warn "yabridgectl is not installed"
+      if [[ -n $(yabridge_ctl) ]]; then
+        yabridgectl status
+      else
+        warn "yabridgectl is not installed"
+      fi
       ;;
     dirs) plugins_dirs ;;
+    install|run) shift; plugins_install "$@" ;;
+    prefix) shift; plugins_prefix_cmd "$@" ;;
+    vendor) shift; plugins_vendor "$@" ;;
+    doctor) plugins_doctor ;;
+    list) plugins_list ;;
+    backup) plugins_backup ;;
     *) fail "unknown plugins command: ${1:-}"; usage; return 2 ;;
   esac
 }

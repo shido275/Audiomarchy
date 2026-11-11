@@ -41,17 +41,45 @@ pick_bin() {
     }'
 }
 
-# First LV2/VST3/CLAP bundle directory the package installed.
+# First LV2/VST3/CLAP bundle directory the package installed. Arch splits
+# many plugin packages (lsp-plugins-lv2, surge-xt-vst3, ...), so look at the
+# package and every installed package whose name starts with it.
 pkg_plugin_dir() {
   local package=$1 dir
-  dir=$(pacman -Ql "$package" 2>/dev/null | awk -F/ '
-    $2 == "usr" && $3 == "lib" && ($4 == "lv2" || $4 == "vst3" || $4 == "clap") {
-      print "/" $2 "/" $3 "/" $4 "/" $5
-      exit
-    }')
+  dir=$(
+    {
+      pacman -Ql "$package" 2>/dev/null
+      while IFS= read -r p; do
+        [[ $p == "$package" ]] && continue
+        pacman -Ql "$p" 2>/dev/null
+      done < <(pacman -Qq 2>/dev/null | grep -E "^${package}(-|$)")
+    } |
+      awk -F/ '
+        $2 == "usr" && $3 == "lib" &&
+        ($4 == "lv2" || $4 == "vst3" || $4 == "clap") && $5 != "" {
+          print "/" $2 "/" $3 "/" $4 "/" $5
+          exit
+        }'
+  )
   if [[ -n $dir && -d $dir ]]; then
     printf '%s\n' "$dir"
+    return 0
   fi
+
+  # Fallback: bundle names rarely match the package name exactly
+  # (DragonflyHallReverb.lv2 belongs to dragonfly-reverb-lv2). Match the
+  # package's first word against the installed bundles.
+  local token=${package%%-*} root entry base
+  for root in /usr/lib/lv2 /usr/lib/vst3 /usr/lib/clap; do
+    [[ -d $root ]] || continue
+    for entry in "$root"/*; do
+      [[ -d $entry ]] || continue
+      base=${entry##*/}
+      [[ ${base,,} == *"${token,,}"* ]] || continue
+      printf '%s\n' "$entry"
+      return 0
+    done
+  done
   return 0
 }
 
@@ -103,24 +131,24 @@ menu_build() {
       case "$mode" in
         gui)
           bin=$(pick_bin "$package")
-          [[ -z $bin ]] && { au_note "menu: no binary found for $package — skipped"; continue; }
+          [[ -z $bin ]] && { au_note "menu: no binary found for $package — skipped" >&2; continue; }
           action="uwsm-app -- $bin"
           ;;
         tui)
           bin=$(pick_bin "$package")
-          [[ -z $bin ]] && { au_note "menu: no binary found for $package — skipped"; continue; }
+          [[ -z $bin ]] && { au_note "menu: no binary found for $package — skipped" >&2; continue; }
           action="omarchy-launch-tui bash -c '$bin; exec bash'"
           ;;
         plugin)
           dir=$(pkg_plugin_dir "$package")
-          [[ -z $dir ]] && { au_note "menu: no plugin bundle found for $package — skipped"; continue; }
+          [[ -z $dir ]] && { au_note "menu: no plugin bundle found for $package — skipped" >&2; continue; }
           action="uwsm-app -- xdg-open '$dir'"
           ;;
         action)
           action="$extra"
           ;;
         *)
-          au_note "menu: unknown mode '$mode' for $entry — skipped"
+          au_note "menu: unknown mode '$mode' for $entry — skipped" >&2
           continue
           ;;
       esac

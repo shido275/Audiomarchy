@@ -161,6 +161,10 @@ au_install_apps
 source "$AUDIOMARCHY_INSTALL/cli/all.sh"
 au_install_cli
 
+source "$AUDIOMARCHY_INSTALL/plugins/all.sh"
+au_say "Windows plugin host (Wine, yabridge, vendor licensing)"
+au_install_windows_plugins
+
 source "$AUDIOMARCHY_INSTALL/audio/all.sh"
 au_install_audio
 
